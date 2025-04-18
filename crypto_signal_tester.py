@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 import re
 import time
 import warnings
-import pytz  # For UTC timezone
+import pytz
 from typing import List, Tuple
 
 # Configure page
@@ -62,7 +62,99 @@ class CryptoTradeTester:
         except Exception as e:
             raise ValueError(f"Signal parsing error: {str(e)}")
 
-    # ... [keep all other methods the same until fetch_historical_data]
+    def _extract_direction_and_price(self, text: str) -> Tuple[str, float]:
+        """Extract trade direction and entry price with flexible parsing"""
+        # Try different patterns
+        patterns = [
+            (r'(buy|sell)\s*at\s*([\d.,]+)', 1, 2),  # "buy at 100" or "sell at 100"
+            (r'(entry|long|short)\s*([\d.,]+)', 1, 2),  # "entry 100" or "long 100"
+            (r'([\d.,]+)\s*(buy|sell)', 2, 1)  # "100 buy" or "100 sell"
+        ]
+        
+        for pattern, dir_group, price_group in patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                direction = match.group(dir_group).lower()
+                if direction in ['long', 'entry']:
+                    direction = 'buy'
+                elif direction == 'short':
+                    direction = 'sell'
+                price = float(match.group(price_group).replace(',', ''))
+                return (direction, price)
+        
+        raise ValueError("Could not determine trade direction and entry price")
+
+    def _extract_price(self, text: str, keywords: List[str]) -> float:
+        """Helper to extract price after keywords with flexible patterns"""
+        for keyword in keywords:
+            # Try "keyword at price" format first
+            match = re.search(fr'{keyword}\s*at\s*([\d.,]+)', text, re.IGNORECASE)
+            if not match:
+                # Then try just "keyword price"
+                match = re.search(fr'{keyword}\s*([\d.,]+)', text, re.IGNORECASE)
+            if match:
+                return float(match.group(1).replace(',', ''))
+        raise ValueError(f"Could not find price for any of: {keywords}")
+
+    def _extract_take_profits(self, text: str) -> List[float]:
+        """Extract all take profit levels with flexible parsing"""
+        # Find all TPx at y patterns
+        tp_matches = re.findall(r'TP\d*\s*at\s*([\d.,]+)', text, re.IGNORECASE)
+        if tp_matches:
+            return [float(x.replace(',', '')) for x in tp_matches]
+        
+        # Find numbered TPs without "at" (TP1 100, TP2 200)
+        tp_matches = re.findall(r'TP\d*\s*([\d.,]+)', text, re.IGNORECASE)
+        if tp_matches:
+            return [float(x.replace(',', '')) for x in tp_matches]
+        
+        # Find multiple TPs in a list (TP: 100, 200, 300)
+        list_match = re.search(r'TPs?:?\s*([\d.,]+(?:\s*,\s*[\d.,]+)*)', text, re.IGNORECASE)
+        if list_match:
+            tps = [float(x.strip()) for x in list_match.group(1).split(',')]
+            return tps
+        
+        # Find single TP if no numbered TPs
+        single_tp = re.search(r'TP\s*at\s*([\d.,]+)', text, re.IGNORECASE) or \
+                   re.search(r'TP\s*([\d.,]+)', text, re.IGNORECASE)
+        if single_tp:
+            return [float(single_tp.group(1).replace(',', ''))]
+        
+        raise ValueError("Could not find take profit levels")
+
+    def _extract_time(self, text: str) -> datetime:
+        """Extract and parse time from signal text with multiple format support"""
+        time_patterns = [
+            # With "time:" prefix
+            (r'time:\s*(\d{4}-\d{1,2}-\d{1,2}\s*\d{1,2}:\d{2}(?::\d{2})?)', '%Y-%m-%d %H:%M:%S'),
+            (r'time:\s*(\d{4}/\d{1,2}/\d{1,2}\s*\d{1,2}:\d{2}(?::\d{2})?)', '%Y/%m/%d %H:%M:%S'),
+            (r'time:\s*(\d{1,2}-\w{3}-\d{4}\s*\d{1,2}:\d{2}(?::\d{2})?)', '%d-%b-%Y %H:%M:%S'),
+            (r'time:\s*(\d{1,2}/\d{1,2}/\d{4}\s*\d{1,2}:\d{2}(?::\d{2})?)', '%m/%d/%Y %H:%M:%S'),
+            
+            # Without prefix
+            (r'(\d{4}-\d{1,2}-\d{1,2}\s*\d{1,2}:\d{2}(?::\d{2})?)', '%Y-%m-%d %H:%M:%S'),
+            (r'(\d{4}/\d{1,2}/\d{1,2}\s*\d{1,2}:\d{2}(?::\d{2})?)', '%Y/%m/%d %H:%M:%S'),
+            (r'(\d{1,2}-\w{3}-\d{4}\s*\d{1,2}:\d{2}(?::\d{2})?)', '%d-%b-%Y %H:%M:%S'),
+            (r'(\d{1,2}/\d{1,2}/\d{4}\s*\d{1,2}:\d{2}(?::\d{2})?)', '%m/%d/%Y %H:%M:%S'),
+            (r'(\d{1,2}\.\d{1,2}\.\d{4}\s*\d{1,2}:\d{2}(?::\d{2})?)', '%d.%m.%Y %H:%M:%S'),
+            
+            # Date only
+            (r'time:\s*(\d{4}-\d{1,2}-\d{1,2})', '%Y-%m-%d'),
+            (r'time:\s*(\d{4}/\d{1,2}/\d{1,2})', '%Y/%m/%d'),
+            (r'(\d{4}-\d{1,2}-\d{1,2})', '%Y-%m-%d'),
+            (r'(\d{4}/\d{1,2}/\d{1,2})', '%Y/%m/%d'),
+        ]
+        
+        for pattern, time_format in time_patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                try:
+                    dt = datetime.strptime(match.group(1), time_format)
+                    return dt.replace(tzinfo=pytz.utc)
+                except ValueError:
+                    continue
+        
+        raise ValueError("Could not find valid time in signal. Include time like: 'Time: YYYY-MM-DD HH:MM'")
 
     def fetch_historical_data(self, pair: str, timeframe: str, start_time: datetime) -> pd.DataFrame:
         """Fetch OHLCV data from exchange from start_time to now (UTC)"""
@@ -124,9 +216,114 @@ class CryptoTradeTester:
         
         return full_df
 
-    # ... [keep all other methods the same]
+    def test_signal(self, signal: dict) -> dict:
+        """Test the trade signal against historical data"""
+        with st.spinner("Running backtest..."):
+            data = self.fetch_historical_data(
+                pair=signal['pair'],
+                timeframe='1h',
+                start_time=signal['signal_time']
+            )
+            
+            prices = data['close']
+            direction = signal['direction']
+            entry = signal['entry']
+            stop_loss = signal['stop_loss']
+            
+            # Sort take profits based on direction
+            if direction == 'buy':
+                take_profits = sorted(signal['take_profits'])  # Ascending for buy (TP1 < TP2)
+            else:
+                take_profits = sorted(signal['take_profits'], reverse=True)  # Descending for sell (TP1 > TP2)
+            
+            # Find closest point to entry price in historical data
+            entry_idx = (prices - entry).abs().idxmin()
+            entry_point = data.index.get_loc(entry_idx)
+            
+            # Initialize results
+            results = {
+                'pair': signal['pair'],
+                'direction': direction,
+                'entry_price': entry,
+                'entry_time': entry_idx,
+                'signal_time': signal['signal_time'],
+                'stop_loss': stop_loss,
+                'take_profits': take_profits,
+                'tp_hit': [],
+                'sl_hit': False,
+                'sl_hit_time': None,
+                'max_price': None,
+                'min_price': None,
+                'result': None,
+                'data_points': len(prices),
+                'test_period': f"{data.index[0]} to {data.index[-1]}",
+                'current_price': prices.iloc[-1],
+                'current_time': data.index[-1],
+                'price_data': data
+            }
+            
+            # Analyze price movement after entry
+            for i in range(entry_point + 1, len(prices)):
+                current_price = prices.iloc[i]
+                current_time = data.index[i]
+                
+                # Update max/min prices
+                if results['max_price'] is None or current_price > results['max_price']:
+                    results['max_price'] = current_price
+                    results['max_price_time'] = current_time
+                if results['min_price'] is None or current_price < results['min_price']:
+                    results['min_price'] = current_price
+                    results['min_price_time'] = current_time
+                
+                # Check for stop loss hit (direction-specific)
+                if direction == 'buy':
+                    sl_condition = current_price <= stop_loss
+                    tp_condition = lambda tp: current_price >= tp
+                else:  # sell
+                    sl_condition = current_price >= stop_loss
+                    tp_condition = lambda tp: current_price <= tp
+                
+                if sl_condition:
+                    results['sl_hit'] = True
+                    results['sl_hit_time'] = current_time
+                    results['result'] = 'SL hit'
+                    break  # Stop checking if SL is hit
+                
+                # Check for take profit hits only if SL not hit
+                if not results['sl_hit']:
+                    for j, tp in enumerate(take_profits):
+                        if j not in results['tp_hit'] and tp_condition(tp):
+                            results['tp_hit'].append(j)
+                            results[f'tp{j+1}_hit_time'] = current_time
+                
+                    # Check if all TPs hit
+                    if len(results['tp_hit']) == len(take_profits):
+                        results['result'] = 'All TPs hit'
+                        break
+            
+            if not results['result']:
+                if results['sl_hit']:
+                    results['result'] = 'SL hit'
+                elif results['tp_hit']:
+                    results['result'] = f"Partial TP hit ({len(results['tp_hit'])}/{len(take_profits)})"
+                else:
+                    results['result'] = "No targets hit"
+            
+            # Calculate duration
+            exit_time = results['sl_hit_time'] if results['sl_hit'] else (
+                results[f'tp{len(results["tp_hit"])}_hit_time'] if results['tp_hit'] else data.index[-1]
+            )
+            results['duration'] = str(exit_time - results['entry_time'])
+            
+            # Calculate PnL
+            if direction == 'buy':
+                results['pct_change'] = ((results['current_price'] - entry) / entry) * 100
+            else:
+                results['pct_change'] = ((entry - results['current_price']) / entry) * 100
+            
+            return results
 
-# Streamlit UI updates to show UTC times
+# Streamlit UI
 def main():
     col1, col2 = st.columns([1, 1])
     
@@ -135,8 +332,10 @@ def main():
         signal_text = st.text_area(
             "Paste your trade signal here:",
             height=200,
-            help="All times are interpreted as UTC\n"
-                 "Example: BTC/USDT Buy at 35000, SL at 34500, TP1 at 35500, Time: 2023-11-15 08:00 UTC"
+            help="Example formats:\n"
+                 "BTC/USDT Buy at 35000, SL at 34500, TP1 at 35500, Time: 2023-11-15 08:00 UTC\n"
+                 "ETH/USDT Sell 2000, Stop Loss 2050, TP1 1950 TP2 1900, Time: 2023-12-01\n"
+                 "SOL/USDT long 120, SL 115, TPs: 125, 130, 135, Time: 01-10-2024 16:30"
         )
         
         exchange = st.selectbox(
@@ -218,6 +417,40 @@ def main():
                 
             except Exception as e:
                 st.error(f"Error: {str(e)}")
+                st.info("Try these valid example formats:\n"
+                        "- BTC/USDT Buy at 35000, SL at 34500, TP1 at 35500, Time: 2023-11-15 08:00 UTC\n"
+                        "- ETH/USDT Sell 2000, Stop Loss 2050, TP1 1950 TP2 1900, Time: 2023-12-01\n"
+                        "- SOL/USDT long 120, SL 115, TPs: 125, 130, 135, Time: 01-10-2024 16:30")
+
+    with col2:
+        st.subheader("Example Signals")
+        st.code("""BTC/USDT Buy at 35000, SL at 34500, TP1 at 35500, Time: 2023-11-15 08:00 UTC""")
+        st.code("""ETH/USDT Sell 2000, Stop Loss 2050, TP1 1950 TP2 1900, Time: 2023-12-01""")
+        st.code("""SOL/USDT long 120, SL 115, TPs: 125, 130, 135, Time: 01-10-2024 16:30""")
+        
+        st.subheader("How To Use")
+        st.markdown("""
+        1. **Paste your trade signal** in the left panel
+        2. **Include all required details**:
+           - Trading pair (e.g., BTC/USDT)
+           - Direction (buy at/sell at/entry at/long/short)
+           - Entry price
+           - Stop loss (SL at, Stop Loss, SL)
+           - Take profit levels (TP1 at, TP1, or TPs: list)
+           - Time (required, multiple formats supported)
+        3. Select your exchange (KuCoin or Coinbase)
+        4. Select timeframe (1m, 5m, 15m, 1h, 4h, 1d)
+        5. Click "Test Signal"
+        
+        **Features**:
+        - All times in UTC
+        - Supports flexible signal formats
+        - Shows exact hit times for SL and TPs
+        - Stops checking TPs if SL is hit first
+        - Proper TP ordering for buy/sell signals
+        - Calculates PnL percentage
+        - Displays price movement chart
+        """)
 
 if __name__ == "__main__":
     main()
