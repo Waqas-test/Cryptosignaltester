@@ -13,7 +13,7 @@ st.title("📈 Crypto Trade Signal Tester")
 
 # Initialize exchange connection
 @st.cache_resource
-def init_exchange(exchange_name='binance'):
+def init_exchange(exchange_name='kucoin'):
     exchange = getattr(ccxt, exchange_name)({
         'enableRateLimit': True,
         'options': {'adjustForTimeDifference': True}
@@ -22,7 +22,7 @@ def init_exchange(exchange_name='binance'):
     return exchange
 
 class CryptoTradeTester:
-    def __init__(self, exchange='binance'):
+    def __init__(self, exchange='kucoin'):
         self.exchange = init_exchange(exchange)
     
     def parse_signal(self, signal_text: str) -> dict:
@@ -76,7 +76,8 @@ class CryptoTradeTester:
     def _extract_price(self, text: str, keywords: List[str]) -> float:
         """Helper to extract price after keywords"""
         for keyword in keywords:
-            match = re.search(fr'{keyword}\s*([\d.,]+)', text, re.IGNORECASE)
+            match = re.search(fr'{keyword}\s*at\s*([\d.,]+)', text, re.IGNORECASE) or \
+                   re.search(fr'{keyword}\s*([\d.,]+)', text, re.IGNORECASE)
             if match:
                 return float(match.group(1).replace(',', ''))
         raise ValueError(f"Could not find price for {keywords}")
@@ -210,6 +211,7 @@ class CryptoTradeTester:
                 'take_profits': take_profits,
                 'tp_hit': [],
                 'sl_hit': False,
+                'sl_hit_time': None,
                 'max_price': None,
                 'min_price': None,
                 'result': None,
@@ -243,32 +245,35 @@ class CryptoTradeTester:
                 
                 if sl_condition:
                     results['sl_hit'] = True
+                    results['sl_hit_time'] = current_time
                     results['result'] = 'SL hit'
-                    results['exit_time'] = current_time
-                    break
+                    break  # Stop checking if SL is hit
                 
-                # Check for take profit hits
-                for j, tp in enumerate(take_profits):
-                    if j not in results['tp_hit'] and tp_condition(tp):
-                        results['tp_hit'].append(j)
-                        results[f'tp{j+1}_hit_time'] = current_time
+                # Check for take profit hits only if SL not hit
+                if not results['sl_hit']:
+                    for j, tp in enumerate(take_profits):
+                        if j not in results['tp_hit'] and tp_condition(tp):
+                            results['tp_hit'].append(j)
+                            results[f'tp{j+1}_hit_time'] = current_time
                 
-                # Check if all TPs hit
-                if len(results['tp_hit']) == len(take_profits):
-                    results['result'] = 'All TPs hit'
-                    results['exit_time'] = current_time
-                    break
+                    # Check if all TPs hit
+                    if len(results['tp_hit']) == len(take_profits):
+                        results['result'] = 'All TPs hit'
+                        break
             
             if not results['result']:
-                if results['tp_hit']:
+                if results['sl_hit']:
+                    results['result'] = 'SL hit'
+                elif results['tp_hit']:
                     results['result'] = f"Partial TP hit ({len(results['tp_hit'])}/{len(take_profits)})"
-                    results['exit_time'] = data.index[-1]
                 else:
                     results['result'] = "No targets hit"
-                    results['exit_time'] = data.index[-1]
             
             # Calculate duration
-            results['duration'] = str(results['exit_time'] - results['entry_time'])
+            exit_time = results['sl_hit_time'] if results['sl_hit'] else (
+                results[f'tp{len(results["tp_hit"])}_hit_time'] if results['tp_hit'] else data.index[-1]
+            )
+            results['duration'] = str(exit_time - results['entry_time'])
             
             # Calculate PnL
             if direction == 'buy':
@@ -293,7 +298,7 @@ def main():
         
         exchange = st.selectbox(
             "Exchange",
-            ['binance', 'kucoin', 'coinbase', 'bybit'],
+            ['kucoin', 'coinbase'],
             index=0
         )
         
@@ -345,7 +350,10 @@ def main():
                     st.write(f"**Data Points:** {results['data_points']}")
                     
                     st.write("\n**Stop Loss:**")
-                    st.write(f"{results['stop_loss']} - {'✅ Hit' if results['sl_hit'] else '❌ Not Hit'}")
+                    sl_status = f"{results['stop_loss']} - {'✅ Hit' if results['sl_hit'] else '❌ Not Hit'}"
+                    if results['sl_hit']:
+                        sl_status += f" at {results['sl_hit_time']}"
+                    st.write(sl_status)
                     
                     st.write("\n**Take Profits:**")
                     for i, tp in enumerate(results['take_profits']):
@@ -376,10 +384,10 @@ def main():
            - Trading pair (e.g., BTC/USDT)
            - Direction (buy at/sell at/entry at)
            - Entry price
-           - Stop loss
-           - Take profit levels
+           - Stop loss (SL at or Stop Loss)
+           - Take profit levels (TP1 at, TP2 at, etc.)
            - Signal time (required)
-        3. Select your exchange
+        3. Select your exchange (KuCoin or Coinbase)
         4. Click "Test Signal"
         
         The app will:
@@ -387,6 +395,8 @@ def main():
         - Fetch historical data from the signal time
         - Simulate the trade
         - Show which targets were hit
+        - Stop checking TPs if SL is hit first
+        - Show exact timestamps for all hits
         """)
 
 if __name__ == "__main__":
