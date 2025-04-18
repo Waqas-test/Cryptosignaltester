@@ -27,86 +27,121 @@ class CryptoTradeTester:
     
     def parse_signal(self, signal_text: str) -> dict:
         """Parse unstructured trade signal text into structured format"""
-        # Extract pair
-        pair_match = re.search(r'([A-Z]{3,}\/[A-Z]{3,})', signal_text)
-        if not pair_match:
-            raise ValueError("Could not find trading pair in signal")
-        pair = pair_match.group(1)
-        
-        # Detect trade direction (buy or sell)
-        direction, entry = self._extract_direction_and_price(signal_text)
-        stop_loss = self._extract_price(signal_text, ['sl', 'stop loss', 'stoploss'])
-        take_profits = self._extract_take_profits(signal_text)
-        
-        # Extract signal time (required)
-        signal_time = self._extract_time(signal_text)
-        
-        # Validate signal time is not in future
-        if signal_time > datetime.now():
-            raise ValueError("Signal time cannot be in the future")
-        
-        return {
-            'pair': pair,
-            'direction': direction,
-            'entry': entry,
-            'stop_loss': stop_loss,
-            'take_profits': take_profits,
-            'signal_time': signal_time
-        }
-    
+        try:
+            # Extract pair
+            pair_match = re.search(r'([A-Z]{3,}\/[A-Z]{3,})', signal_text, re.IGNORECASE)
+            if not pair_match:
+                raise ValueError("Could not find trading pair in signal")
+            pair = pair_match.group(1).upper()
+            
+            # Detect trade direction (buy or sell) and entry price
+            direction, entry = self._extract_direction_and_price(signal_text)
+            
+            # Extract stop loss (supports "SL at", "Stop Loss", "stoploss" formats)
+            stop_loss = self._extract_price(signal_text, ['sl at', 'stop loss at', 'stoploss at', 'sl', 'stop loss', 'stoploss'])
+            
+            # Extract take profits (supports TP1 at, TP2 at, or multiple TPs)
+            take_profits = self._extract_take_profits(signal_text)
+            
+            # Extract signal time (required)
+            signal_time = self._extract_time(signal_text)
+            
+            # Validate signal time is not in future
+            if signal_time > datetime.now():
+                raise ValueError("Signal time cannot be in the future")
+            
+            return {
+                'pair': pair,
+                'direction': direction,
+                'entry': entry,
+                'stop_loss': stop_loss,
+                'take_profits': take_profits,
+                'signal_time': signal_time
+            }
+        except Exception as e:
+            raise ValueError(f"Signal parsing error: {str(e)}")
+
     def _extract_direction_and_price(self, text: str) -> Tuple[str, float]:
-        """Extract trade direction and entry price"""
-        # Try buy first
-        buy_match = re.search(r'buy\s*at\s*([\d.,]+)', text, re.IGNORECASE)
-        if buy_match:
-            return ('buy', float(buy_match.group(1).replace(',', '')))
+        """Extract trade direction and entry price with flexible parsing"""
+        # Try different patterns
+        patterns = [
+            (r'(buy|sell)\s*at\s*([\d.,]+)', 1, 2),  # "buy at 100" or "sell at 100"
+            (r'(entry|long|short)\s*([\d.,]+)', 1, 2),  # "entry 100" or "long 100"
+            (r'([\d.,]+)\s*(buy|sell)', 2, 1)  # "100 buy" or "100 sell"
+        ]
         
-        # Then try sell
-        sell_match = re.search(r'sell\s*at\s*([\d.,]+)', text, re.IGNORECASE)
-        if sell_match:
-            return ('sell', float(sell_match.group(1).replace(',', '')))
+        for pattern, dir_group, price_group in patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                direction = match.group(dir_group).lower()
+                if direction in ['long', 'entry']:
+                    direction = 'buy'
+                elif direction == 'short':
+                    direction = 'sell'
+                price = float(match.group(price_group).replace(',', ''))
+                return (direction, price)
         
-        # Then try generic entry
-        entry_match = re.search(r'entry\s*at\s*([\d.,]+)', text, re.IGNORECASE)
-        if entry_match:
-            return ('buy', float(entry_match.group(1).replace(',', '')))  # Default to buy
-        
-        raise ValueError("Could not find trade direction and entry price")
-    
+        raise ValueError("Could not determine trade direction and entry price")
+
     def _extract_price(self, text: str, keywords: List[str]) -> float:
-        """Helper to extract price after keywords"""
+        """Helper to extract price after keywords with flexible patterns"""
         for keyword in keywords:
-            match = re.search(fr'{keyword}\s*at\s*([\d.,]+)', text, re.IGNORECASE) or \
-                   re.search(fr'{keyword}\s*([\d.,]+)', text, re.IGNORECASE)
+            # Try "keyword at price" format first
+            match = re.search(fr'{keyword}\s*at\s*([\d.,]+)', text, re.IGNORECASE)
+            if not match:
+                # Then try just "keyword price"
+                match = re.search(fr'{keyword}\s*([\d.,]+)', text, re.IGNORECASE)
             if match:
                 return float(match.group(1).replace(',', ''))
-        raise ValueError(f"Could not find price for {keywords}")
-    
+        raise ValueError(f"Could not find price for any of: {keywords}")
+
     def _extract_take_profits(self, text: str) -> List[float]:
-        """Extract all take profit levels"""
+        """Extract all take profit levels with flexible parsing"""
         # Find all TPx at y patterns
         tp_matches = re.findall(r'TP\d*\s*at\s*([\d.,]+)', text, re.IGNORECASE)
         if tp_matches:
-            return [float(x.replace(',', '')) for x in tp_matches]
+            return sorted([float(x.replace(',', '')) for x in tp_matches])
+        
+        # Find numbered TPs without "at" (TP1 100, TP2 200)
+        tp_matches = re.findall(r'TP\d*\s*([\d.,]+)', text, re.IGNORECASE)
+        if tp_matches:
+            return sorted([float(x.replace(',', '')) for x in tp_matches])
+        
+        # Find multiple TPs in a list (TP: 100, 200, 300)
+        list_match = re.search(r'TPs?:?\s*([\d.,]+(?:\s*,\s*[\d.,]+)*)', text, re.IGNORECASE)
+        if list_match:
+            tps = [float(x.strip()) for x in list_match.group(1).split(',')]
+            return sorted(tps)
         
         # Find single TP if no numbered TPs
-        single_tp = re.search(r'TP\s*at\s*([\d.,]+)', text, re.IGNORECASE)
+        single_tp = re.search(r'TP\s*at\s*([\d.,]+)', text, re.IGNORECASE) or \
+                   re.search(r'TP\s*([\d.,]+)', text, re.IGNORECASE)
         if single_tp:
             return [float(single_tp.group(1).replace(',', ''))]
         
         raise ValueError("Could not find take profit levels")
-    
+
     def _extract_time(self, text: str) -> datetime:
-        """Extract and parse time from signal text"""
+        """Extract and parse time from signal text with multiple format support"""
         time_patterns = [
+            # With "time:" prefix
             (r'time:\s*(\d{4}-\d{1,2}-\d{1,2}\s*\d{1,2}:\d{2}(?::\d{2})?)', '%Y-%m-%d %H:%M:%S'),
             (r'time:\s*(\d{4}/\d{1,2}/\d{1,2}\s*\d{1,2}:\d{2}(?::\d{2})?)', '%Y/%m/%d %H:%M:%S'),
             (r'time:\s*(\d{1,2}-\w{3}-\d{4}\s*\d{1,2}:\d{2}(?::\d{2})?)', '%d-%b-%Y %H:%M:%S'),
+            (r'time:\s*(\d{1,2}/\d{1,2}/\d{4}\s*\d{1,2}:\d{2}(?::\d{2})?)', '%m/%d/%Y %H:%M:%S'),
+            
+            # Without prefix
             (r'(\d{4}-\d{1,2}-\d{1,2}\s*\d{1,2}:\d{2}(?::\d{2})?)', '%Y-%m-%d %H:%M:%S'),
             (r'(\d{4}/\d{1,2}/\d{1,2}\s*\d{1,2}:\d{2}(?::\d{2})?)', '%Y/%m/%d %H:%M:%S'),
             (r'(\d{1,2}-\w{3}-\d{4}\s*\d{1,2}:\d{2}(?::\d{2})?)', '%d-%b-%Y %H:%M:%S'),
             (r'(\d{1,2}/\d{1,2}/\d{4}\s*\d{1,2}:\d{2}(?::\d{2})?)', '%m/%d/%Y %H:%M:%S'),
             (r'(\d{1,2}\.\d{1,2}\.\d{4}\s*\d{1,2}:\d{2}(?::\d{2})?)', '%d.%m.%Y %H:%M:%S'),
+            
+            # Date only
+            (r'time:\s*(\d{4}-\d{1,2}-\d{1,2})', '%Y-%m-%d'),
+            (r'time:\s*(\d{4}/\d{1,2}/\d{1,2})', '%Y/%m/%d'),
+            (r'(\d{4}-\d{1,2}-\d{1,2})', '%Y-%m-%d'),
+            (r'(\d{4}/\d{1,2}/\d{1,2})', '%Y/%m/%d'),
         ]
         
         for pattern, time_format in time_patterns:
@@ -115,12 +150,10 @@ class CryptoTradeTester:
                 try:
                     return datetime.strptime(match.group(1), time_format)
                 except ValueError:
-                    if time_format.endswith(':%S'):
-                        return datetime.strptime(match.group(1), time_format[:-3])
                     continue
         
         raise ValueError("Could not find valid time in signal. Include time like: 'Time: YYYY-MM-DD HH:MM'")
-    
+
     def fetch_historical_data(self, pair: str, timeframe: str, start_time: datetime) -> pd.DataFrame:
         """Fetch OHLCV data from exchange from start_time to now"""
         all_ohlcv = []
@@ -292,14 +325,22 @@ def main():
         signal_text = st.text_area(
             "Paste your trade signal here:",
             height=200,
-            help="Example: BTC/USDT Buy at 35000, SL at 34500, TP1 at 35500, Time: 2023-11-15 08:00\n"
-                 "Example: ETH/USDT Sell at 2000, SL at 2050, TP1 at 1950, Time: 2023-12-01 12:00"
+            help="Example formats:\n"
+                 "BTC/USDT Buy at 35000, SL at 34500, TP1 at 35500, Time: 2023-11-15 08:00\n"
+                 "ETH/USDT Sell 2000, Stop Loss 2050, TP1 1950 TP2 1900, Time: 2023-12-01\n"
+                 "SOL/USDT long 120, SL 115, TPs: 125, 130, 135, Time: 01-10-2024 16:30"
         )
         
         exchange = st.selectbox(
             "Exchange",
             ['kucoin', 'coinbase'],
             index=0
+        )
+        
+        timeframe = st.selectbox(
+            "Timeframe",
+            ['1m', '5m', '15m', '1h', '4h', '1d'],
+            index=3
         )
         
         if st.button("Test Signal", use_container_width=True):
@@ -313,6 +354,7 @@ def main():
                 # Parse signal
                 with st.spinner("Parsing signal..."):
                     signal = tester.parse_signal(signal_text)
+                    st.session_state.signal = signal  # Save for later use
                 
                 # Display parsed signal
                 with st.expander("Parsed Signal Details", expanded=True):
@@ -325,6 +367,7 @@ def main():
                 
                 # Run backtest
                 results = tester.test_signal(signal)
+                st.session_state.results = results  # Save for later use
                 
                 # Display results
                 st.subheader("Backtest Results")
@@ -367,36 +410,37 @@ def main():
                 
             except Exception as e:
                 st.error(f"Error: {str(e)}")
-                st.info("Example formats:\n"
-                        "- Buy: BTC/USDT Buy at 35000, SL at 34500, TP1 at 35500, Time: 2023-11-15 08:00\n"
-                        "- Sell: ETH/USDT Sell at 2000, SL at 2050, TP1 at 1950, Time: 2023-12-01 12:00")
+                st.info("Try these valid example formats:\n"
+                        "- BTC/USDT Buy at 35000, SL at 34500, TP1 at 35500, Time: 2023-11-15 08:00\n"
+                        "- ETH/USDT Sell 2000, Stop Loss 2050, TP1 1950 TP2 1900, Time: 2023-12-01\n"
+                        "- SOL/USDT long 120, SL 115, TPs: 125, 130, 135, Time: 01-10-2024 16:30")
 
     with col2:
         st.subheader("Example Signals")
         st.code("""BTC/USDT Buy at 35000, SL at 34500, TP1 at 35500, Time: 2023-11-15 08:00""")
-        st.code("""ETH/USDT Sell at 2000, Stop Loss 2050, TP1 1950, TP2 1900, Time: 2023-12-01 12:00""")
-        st.code("""SOL/USDT Entry 120, SL 115, TP1 125, TP2 130, TP3 135, Time: 2024-01-10 16:30""")
+        st.code("""ETH/USDT Sell 2000, Stop Loss 2050, TP1 1950 TP2 1900, Time: 2023-12-01""")
+        st.code("""SOL/USDT long 120, SL 115, TPs: 125, 130, 135, Time: 01-10-2024 16:30""")
         
         st.subheader("How To Use")
         st.markdown("""
-        1. Paste your trade signal in the left panel
-        2. Include all required details:
+        1. **Paste your trade signal** in the left panel
+        2. **Include all required details**:
            - Trading pair (e.g., BTC/USDT)
-           - Direction (buy at/sell at/entry at)
+           - Direction (buy at/sell at/entry at/long/short)
            - Entry price
-           - Stop loss (SL at or Stop Loss)
-           - Take profit levels (TP1 at, TP2 at, etc.)
-           - Signal time (required)
+           - Stop loss (SL at, Stop Loss, SL)
+           - Take profit levels (TP1 at, TP1, or TPs: list)
+           - Time (required, multiple formats supported)
         3. Select your exchange (KuCoin or Coinbase)
-        4. Click "Test Signal"
+        4. Select timeframe (1m, 5m, 15m, 1h, 4h, 1d)
+        5. Click "Test Signal"
         
-        The app will:
-        - Parse your signal
-        - Fetch historical data from the signal time
-        - Simulate the trade
-        - Show which targets were hit
-        - Stop checking TPs if SL is hit first
-        - Show exact timestamps for all hits
+        **Features**:
+        - Supports flexible signal formats
+        - Shows exact hit times for SL and TPs
+        - Stops checking TPs if SL is hit first
+        - Calculates PnL percentage
+        - Displays price movement chart
         """)
 
 if __name__ == "__main__":
