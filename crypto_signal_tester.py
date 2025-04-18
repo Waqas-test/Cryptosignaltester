@@ -358,9 +358,9 @@ def main():
             "Paste your trade signal here:",
             height=200,
             help="Example formats:\n"
-                 "BTC/USDT Buy at 35000, SL at 34500, TP1 at 35500, Time: 2023-11-15 08:00\n"
+                 "BTC/USDT Buy at 35000, SL at 34500, TP1 at 35500, Time: 2023-11-15 08:00:00\n"
                  "ETH/USDT Sell at 2000, Stop Loss 2050, TP1 1950 TP2 1900, Time: 2023-12-01\n"
-                 "SOL/USDT long at 120, SL 115, TPs: 125, 130, 135, Time: 01-10-2024 16:30"
+                 "SOL/USDT long at 120, SL 115, TPs: 125, 130, 135, Time: 01-10-2024 16:30:00"
         )
         
         exchange = st.selectbox(
@@ -443,15 +443,15 @@ def main():
             except Exception as e:
                 st.error(f"Error: {str(e)}")
                 st.info("Try these valid example formats:\n"
-                        "- BTC/USDT Buy at 35000, SL at 34500, TP1 at 35500, Time: 2023-11-15 08:00\n"
+                        "- BTC/USDT Buy at 35000, SL at 34500, TP1 at 35500, Time: 2023-11-15 08:00:00\n"
                         "- ETH/USDT Sell at 2000, Stop Loss 2050, TP1 1950 TP2 1900, Time: 2023-12-01\n"
-                        "- SOL/USDT long at 120, SL 115, TPs: 125, 130, 135, Time: 01-10-2024 16:30")
+                        "- SOL/USDT long at 120, SL 115, TPs: 125, 130, 135, Time: 01-10-2024 16:30:00")
 
     with col2:
         st.subheader("Example Signals")
-        st.code("""BTC/USDT Buy at 35000, SL at 34500, TP1 at 35500, Time: 2023-11-15 08:00""")
+        st.code("""BTC/USDT Buy at 35000, SL at 34500, TP1 at 35500, Time: 2023-11-15 08:00:00""")
         st.code("""ETH/USDT Sell at 2000, Stop Loss 2050, TP1 1950 TP2 1900, Time: 2023-12-01""")
-        st.code("""SOL/USDT long at 120, SL 115, TPs: 125, 130, 135, Time: 01-10-2024 16:30""")
+        st.code("""SOL/USDT long at 120, SL 115, TPs: 125, 130, 135, Time: 01-10-2024 16:30:00""")
         
         st.subheader("How To Use")
         st.markdown("""
