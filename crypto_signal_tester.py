@@ -59,12 +59,12 @@ class CryptoTradeTester:
         # Try buy first
         buy_match = re.search(r'buy\s*at\s*([\d.,]+)', text, re.IGNORECASE)
         if buy_match:
-            return ('buy', float(buy_match.group(1).replace(',', ''))
+            return ('buy', float(buy_match.group(1).replace(',', '')))
         
         # Then try sell
         sell_match = re.search(r'sell\s*at\s*([\d.,]+)', text, re.IGNORECASE)
         if sell_match:
-            return ('sell', float(sell_match.group(1).replace(',', ''))
+            return ('sell', float(sell_match.group(1).replace(',', '')))
         
         # Then try generic entry
         entry_match = re.search(r'entry\s*at\s*([\d.,]+)', text, re.IGNORECASE)
