@@ -48,8 +48,9 @@ class CryptoTradeTester:
             signal_time = self._extract_time(signal_text)
             
             # Validate signal time is not in future
-            if signal_time > datetime.now(pytz.utc):
-                raise ValueError("Signal time cannot be in the future")
+            current_time = datetime.now(pytz.utc)
+            if signal_time > current_time:
+                raise ValueError(f"Signal time cannot be in the future (Current UTC: {current_time})")
             
             return {
                 'pair': pair,
@@ -162,7 +163,7 @@ class CryptoTradeTester:
         current_time = start_time
         max_attempts = 5
         attempts = 0
-        end_time = datetime.now(pytz.utc)  # Use UTC now
+        end_time = datetime.now(pytz.utc)
         
         progress_bar = st.progress(0, text="Fetching historical data...")
         status_text = st.empty()
@@ -217,111 +218,135 @@ class CryptoTradeTester:
         return full_df
 
     def test_signal(self, signal: dict) -> dict:
-        """Test the trade signal against historical data"""
+        """Test the trade signal against historical data with proper time consideration"""
         with st.spinner("Running backtest..."):
-            data = self.fetch_historical_data(
-                pair=signal['pair'],
-                timeframe='1h',
-                start_time=signal['signal_time']
-            )
-            
-            prices = data['close']
-            direction = signal['direction']
-            entry = signal['entry']
-            stop_loss = signal['stop_loss']
-            
-            # Sort take profits based on direction
-            if direction == 'buy':
-                take_profits = sorted(signal['take_profits'])  # Ascending for buy (TP1 < TP2)
-            else:
-                take_profits = sorted(signal['take_profits'], reverse=True)  # Descending for sell (TP1 > TP2)
-            
-            # Find closest point to entry price in historical data
-            entry_idx = (prices - entry).abs().idxmin()
-            entry_point = data.index.get_loc(entry_idx)
-            
-            # Initialize results
-            results = {
-                'pair': signal['pair'],
-                'direction': direction,
-                'entry_price': entry,
-                'entry_time': entry_idx,
-                'signal_time': signal['signal_time'],
-                'stop_loss': stop_loss,
-                'take_profits': take_profits,
-                'tp_hit': [],
-                'sl_hit': False,
-                'sl_hit_time': None,
-                'max_price': None,
-                'min_price': None,
-                'result': None,
-                'data_points': len(prices),
-                'test_period': f"{data.index[0]} to {data.index[-1]}",
-                'current_price': prices.iloc[-1],
-                'current_time': data.index[-1],
-                'price_data': data
-            }
-            
-            # Analyze price movement after entry
-            for i in range(entry_point + 1, len(prices)):
-                current_price = prices.iloc[i]
-                current_time = data.index[i]
+            try:
+                # Verify we have enough historical data
+                if signal['signal_time'] > datetime.now(pytz.utc):
+                    raise ValueError("Signal time is in the future")
                 
-                # Update max/min prices
-                if results['max_price'] is None or current_price > results['max_price']:
-                    results['max_price'] = current_price
-                    results['max_price_time'] = current_time
-                if results['min_price'] is None or current_price < results['min_price']:
-                    results['min_price'] = current_price
-                    results['min_price_time'] = current_time
+                # Fetch data starting from 24 hours before signal time to ensure we capture the entry
+                data_start = signal['signal_time'] - timedelta(hours=24)
+                data = self.fetch_historical_data(
+                    pair=signal['pair'],
+                    timeframe='1h',
+                    start_time=data_start
+                )
                 
-                # Check for stop loss hit (direction-specific)
+                # Filter to only include data from signal_time onward
+                data = data[data.index >= signal['signal_time']]
+                
+                if len(data) == 0:
+                    raise ValueError(f"No data available after signal time {signal['signal_time']}")
+                
+                prices = data['close']
+                direction = signal['direction']
+                entry = signal['entry']
+                stop_loss = signal['stop_loss']
+                
+                # Sort take profits based on direction
                 if direction == 'buy':
-                    sl_condition = current_price <= stop_loss
-                    tp_condition = lambda tp: current_price >= tp
-                else:  # sell
-                    sl_condition = current_price >= stop_loss
-                    tp_condition = lambda tp: current_price <= tp
-                
-                if sl_condition:
-                    results['sl_hit'] = True
-                    results['sl_hit_time'] = current_time
-                    results['result'] = 'SL hit'
-                    break  # Stop checking if SL is hit
-                
-                # Check for take profit hits only if SL not hit
-                if not results['sl_hit']:
-                    for j, tp in enumerate(take_profits):
-                        if j not in results['tp_hit'] and tp_condition(tp):
-                            results['tp_hit'].append(j)
-                            results[f'tp{j+1}_hit_time'] = current_time
-                
-                    # Check if all TPs hit
-                    if len(results['tp_hit']) == len(take_profits):
-                        results['result'] = 'All TPs hit'
-                        break
-            
-            if not results['result']:
-                if results['sl_hit']:
-                    results['result'] = 'SL hit'
-                elif results['tp_hit']:
-                    results['result'] = f"Partial TP hit ({len(results['tp_hit'])}/{len(take_profits)})"
+                    take_profits = sorted(signal['take_profits'])  # Ascending for buy
                 else:
-                    results['result'] = "No targets hit"
+                    take_profits = sorted(signal['take_profits'], reverse=True)  # Descending for sell
+                
+                # Find the exact entry point at or after signal time
+                entry_idx = None
+                for idx in data.index:
+                    if idx >= signal['signal_time']:
+                        entry_idx = idx
+                        break
+                
+                if entry_idx is None:
+                    raise ValueError("Could not find suitable entry point after signal time")
+                
+                entry_point = data.index.get_loc(entry_idx)
+                
+                # Initialize results
+                results = {
+                    'pair': signal['pair'],
+                    'direction': direction,
+                    'entry_price': entry,
+                    'entry_time': entry_idx,
+                    'signal_time': signal['signal_time'],
+                    'stop_loss': stop_loss,
+                    'take_profits': take_profits,
+                    'tp_hit': [],
+                    'sl_hit': False,
+                    'sl_hit_time': None,
+                    'max_price': None,
+                    'min_price': None,
+                    'result': None,
+                    'data_points': len(prices),
+                    'test_period': f"{data.index[0]} to {data.index[-1]}",
+                    'current_price': prices.iloc[-1],
+                    'current_time': data.index[-1],
+                    'price_data': data
+                }
+                
+                # Analyze price movement after entry
+                for i in range(entry_point + 1, len(prices)):
+                    current_price = prices.iloc[i]
+                    current_time = data.index[i]
+                    
+                    # Update max/min prices
+                    if results['max_price'] is None or current_price > results['max_price']:
+                        results['max_price'] = current_price
+                        results['max_price_time'] = current_time
+                    if results['min_price'] is None or current_price < results['min_price']:
+                        results['min_price'] = current_price
+                        results['min_price_time'] = current_time
+                    
+                    # Check for stop loss hit (direction-specific)
+                    if direction == 'buy':
+                        sl_condition = current_price <= stop_loss
+                        tp_condition = lambda tp: current_price >= tp
+                    else:  # sell
+                        sl_condition = current_price >= stop_loss
+                        tp_condition = lambda tp: current_price <= tp
+                    
+                    if sl_condition:
+                        results['sl_hit'] = True
+                        results['sl_hit_time'] = current_time
+                        results['result'] = 'SL hit'
+                        break  # Stop checking if SL is hit
+                    
+                    # Check for take profit hits only if SL not hit
+                    if not results['sl_hit']:
+                        for j, tp in enumerate(take_profits):
+                            if j not in results['tp_hit'] and tp_condition(tp):
+                                results['tp_hit'].append(j)
+                                results[f'tp{j+1}_hit_time'] = current_time
+                    
+                        # Check if all TPs hit
+                        if len(results['tp_hit']) == len(take_profits):
+                            results['result'] = 'All TPs hit'
+                            break
+                
+                if not results['result']:
+                    if results['sl_hit']:
+                        results['result'] = 'SL hit'
+                    elif results['tp_hit']:
+                        results['result'] = f"Partial TP hit ({len(results['tp_hit'])}/{len(take_profits)})"
+                    else:
+                        results['result'] = "No targets hit"
+                
+                # Calculate duration
+                exit_time = results['sl_hit_time'] if results['sl_hit'] else (
+                    results[f'tp{len(results["tp_hit"])}_hit_time'] if results['tp_hit'] else data.index[-1]
+                )
+                results['duration'] = str(exit_time - results['entry_time'])
+                
+                # Calculate PnL
+                if direction == 'buy':
+                    results['pct_change'] = ((results['current_price'] - entry) / entry) * 100
+                else:
+                    results['pct_change'] = ((entry - results['current_price']) / entry) * 100
+                
+                return results
             
-            # Calculate duration
-            exit_time = results['sl_hit_time'] if results['sl_hit'] else (
-                results[f'tp{len(results["tp_hit"])}_hit_time'] if results['tp_hit'] else data.index[-1]
-            )
-            results['duration'] = str(exit_time - results['entry_time'])
-            
-            # Calculate PnL
-            if direction == 'buy':
-                results['pct_change'] = ((results['current_price'] - entry) / entry) * 100
-            else:
-                results['pct_change'] = ((entry - results['current_price']) / entry) * 100
-            
-            return results
+            except Exception as e:
+                raise ValueError(f"Backtesting error: {str(e)}")
 
 # Streamlit UI
 def main():
@@ -333,9 +358,9 @@ def main():
             "Paste your trade signal here:",
             height=200,
             help="Example formats:\n"
-                 "BTC/USDT Buy at 35000, SL at 34500, TP1 at 35500, Time: 2023-11-15 08:00 UTC\n"
-                 "ETH/USDT Sell 2000, Stop Loss 2050, TP1 1950 TP2 1900, Time: 2023-12-01\n"
-                 "SOL/USDT long 120, SL 115, TPs: 125, 130, 135, Time: 01-10-2024 16:30"
+                 "BTC/USDT Buy at 35000, SL at 34500, TP1 at 35500, Time: 2023-11-15 08:00\n"
+                 "ETH/USDT Sell at 2000, Stop Loss 2050, TP1 1950 TP2 1900, Time: 2023-12-01\n"
+                 "SOL/USDT long at 120, SL 115, TPs: 125, 130, 135, Time: 01-10-2024 16:30"
         )
         
         exchange = st.selectbox(
@@ -418,15 +443,15 @@ def main():
             except Exception as e:
                 st.error(f"Error: {str(e)}")
                 st.info("Try these valid example formats:\n"
-                        "- BTC/USDT Buy at 35000, SL at 34500, TP1 at 35500, Time: 2023-11-15 08:00 UTC\n"
-                        "- ETH/USDT Sell 2000, Stop Loss 2050, TP1 1950 TP2 1900, Time: 2023-12-01\n"
-                        "- SOL/USDT long 120, SL 115, TPs: 125, 130, 135, Time: 01-10-2024 16:30")
+                        "- BTC/USDT Buy at 35000, SL at 34500, TP1 at 35500, Time: 2023-11-15 08:00\n"
+                        "- ETH/USDT Sell at 2000, Stop Loss 2050, TP1 1950 TP2 1900, Time: 2023-12-01\n"
+                        "- SOL/USDT long at 120, SL 115, TPs: 125, 130, 135, Time: 01-10-2024 16:30")
 
     with col2:
         st.subheader("Example Signals")
-        st.code("""BTC/USDT Buy at 35000, SL at 34500, TP1 at 35500, Time: 2023-11-15 08:00 UTC""")
-        st.code("""ETH/USDT Sell 2000, Stop Loss 2050, TP1 1950 TP2 1900, Time: 2023-12-01""")
-        st.code("""SOL/USDT long 120, SL 115, TPs: 125, 130, 135, Time: 01-10-2024 16:30""")
+        st.code("""BTC/USDT Buy at 35000, SL at 34500, TP1 at 35500, Time: 2023-11-15 08:00""")
+        st.code("""ETH/USDT Sell at 2000, Stop Loss 2050, TP1 1950 TP2 1900, Time: 2023-12-01""")
+        st.code("""SOL/USDT long at 120, SL 115, TPs: 125, 130, 135, Time: 01-10-2024 16:30""")
         
         st.subheader("How To Use")
         st.markdown("""
