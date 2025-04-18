@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 import re
 import time
 import warnings
-from typing import List
+from typing import List, Tuple
 
 # Configure page
 st.set_page_config(page_title="Crypto Trade Signal Tester", layout="wide")
@@ -33,8 +33,8 @@ class CryptoTradeTester:
             raise ValueError("Could not find trading pair in signal")
         pair = pair_match.group(1)
         
-        # Extract prices
-        entry = self._extract_price(signal_text, ['entry', 'buy at', 'enter at'])
+        # Detect trade direction (buy or sell)
+        direction, entry = self._extract_direction_and_price(signal_text)
         stop_loss = self._extract_price(signal_text, ['sl', 'stop loss', 'stoploss'])
         take_profits = self._extract_take_profits(signal_text)
         
@@ -47,11 +47,31 @@ class CryptoTradeTester:
         
         return {
             'pair': pair,
+            'direction': direction,
             'entry': entry,
             'stop_loss': stop_loss,
             'take_profits': take_profits,
             'signal_time': signal_time
         }
+    
+    def _extract_direction_and_price(self, text: str) -> Tuple[str, float]:
+        """Extract trade direction and entry price"""
+        # Try buy first
+        buy_match = re.search(r'buy\s*at\s*([\d.,]+)', text, re.IGNORECASE)
+        if buy_match:
+            return ('buy', float(buy_match.group(1).replace(',', ''))
+        
+        # Then try sell
+        sell_match = re.search(r'sell\s*at\s*([\d.,]+)', text, re.IGNORECASE)
+        if sell_match:
+            return ('sell', float(sell_match.group(1).replace(',', ''))
+        
+        # Then try generic entry
+        entry_match = re.search(r'entry\s*at\s*([\d.,]+)', text, re.IGNORECASE)
+        if entry_match:
+            return ('buy', float(entry_match.group(1).replace(',', '')))  # Default to buy
+        
+        raise ValueError("Could not find trade direction and entry price")
     
     def _extract_price(self, text: str, keywords: List[str]) -> float:
         """Helper to extract price after keywords"""
@@ -63,10 +83,12 @@ class CryptoTradeTester:
     
     def _extract_take_profits(self, text: str) -> List[float]:
         """Extract all take profit levels"""
+        # Find all TPx at y patterns
         tp_matches = re.findall(r'TP\d*\s*at\s*([\d.,]+)', text, re.IGNORECASE)
         if tp_matches:
             return [float(x.replace(',', '')) for x in tp_matches]
         
+        # Find single TP if no numbered TPs
         single_tp = re.search(r'TP\s*at\s*([\d.,]+)', text, re.IGNORECASE)
         if single_tp:
             return [float(single_tp.group(1).replace(',', ''))]
@@ -168,17 +190,19 @@ class CryptoTradeTester:
             )
             
             prices = data['close']
+            direction = signal['direction']
             entry = signal['entry']
             stop_loss = signal['stop_loss']
             take_profits = sorted(signal['take_profits'])
             
-            # Find closest entry point
+            # Find closest point to entry price in historical data
             entry_idx = (prices - entry).abs().idxmin()
             entry_point = data.index.get_loc(entry_idx)
             
             # Initialize results
             results = {
                 'pair': signal['pair'],
+                'direction': direction,
                 'entry_price': entry,
                 'entry_time': entry_idx,
                 'signal_time': signal['signal_time'],
@@ -196,7 +220,7 @@ class CryptoTradeTester:
                 'price_data': data
             }
             
-            # Analyze price movement
+            # Analyze price movement after entry
             for i in range(entry_point + 1, len(prices)):
                 current_price = prices.iloc[i]
                 current_time = data.index[i]
@@ -209,22 +233,27 @@ class CryptoTradeTester:
                     results['min_price'] = current_price
                     results['min_price_time'] = current_time
                 
-                # Check for stop loss
-                if (entry > stop_loss and current_price <= stop_loss) or \
-                   (entry < stop_loss and current_price >= stop_loss):
+                # Check for stop loss hit (direction-specific)
+                if direction == 'buy':
+                    sl_condition = current_price <= stop_loss
+                    tp_condition = lambda tp: current_price >= tp
+                else:  # sell
+                    sl_condition = current_price >= stop_loss
+                    tp_condition = lambda tp: current_price <= tp
+                
+                if sl_condition:
                     results['sl_hit'] = True
                     results['result'] = 'SL hit'
                     results['exit_time'] = current_time
                     break
                 
-                # Check take profits
+                # Check for take profit hits
                 for j, tp in enumerate(take_profits):
-                    if j not in results['tp_hit']:
-                        if (entry < tp and current_price >= tp) or \
-                           (entry > tp and current_price <= tp):
-                            results['tp_hit'].append(j)
-                            results[f'tp{j+1}_hit_time'] = current_time
+                    if j not in results['tp_hit'] and tp_condition(tp):
+                        results['tp_hit'].append(j)
+                        results[f'tp{j+1}_hit_time'] = current_time
                 
+                # Check if all TPs hit
                 if len(results['tp_hit']) == len(take_profits):
                     results['result'] = 'All TPs hit'
                     results['exit_time'] = current_time
@@ -238,7 +267,14 @@ class CryptoTradeTester:
                     results['result'] = "No targets hit"
                     results['exit_time'] = data.index[-1]
             
+            # Calculate duration
             results['duration'] = str(results['exit_time'] - results['entry_time'])
+            
+            # Calculate PnL
+            if direction == 'buy':
+                results['pct_change'] = ((results['current_price'] - entry) / entry) * 100
+            else:
+                results['pct_change'] = ((entry - results['current_price']) / entry) * 100
             
             return results
 
@@ -251,7 +287,8 @@ def main():
         signal_text = st.text_area(
             "Paste your trade signal here:",
             height=200,
-            help="Example: BTC/USDT Buy at 35000, SL at 34500, TP1 at 35500, Time: 2023-11-15 08:00"
+            help="Example: BTC/USDT Buy at 35000, SL at 34500, TP1 at 35500, Time: 2023-11-15 08:00\n"
+                 "Example: ETH/USDT Sell at 2000, SL at 2050, TP1 at 1950, Time: 2023-12-01 12:00"
         )
         
         exchange = st.selectbox(
@@ -275,6 +312,7 @@ def main():
                 # Display parsed signal
                 with st.expander("Parsed Signal Details", expanded=True):
                     st.write(f"**Pair:** {signal['pair']}")
+                    st.write(f"**Direction:** {signal['direction'].upper()}")
                     st.write(f"**Entry Price:** {signal['entry']}")
                     st.write(f"**Stop Loss:** {signal['stop_loss']}")
                     st.write(f"**Take Profits:** {', '.join(map(str, signal['take_profits']))}")
@@ -288,18 +326,22 @@ def main():
                 
                 # Metrics row
                 m1, m2, m3, m4 = st.columns(4)
-                m1.metric("Entry Price", f"{results['entry_price']}")
-                delta = ((results['current_price']-results['entry_price'])/results['entry_price']*100)
-                m2.metric("Current Price", f"{results['current_price']}", f"{delta:.2f}%")
-                m3.metric("Max Price", f"{results['max_price']}")
-                m4.metric("Min Price", f"{results['min_price']}")
+                m1.metric("Direction", results['direction'].upper())
+                m2.metric("Entry Price", f"{results['entry_price']}")
+                m3.metric("Current Price", f"{results['current_price']}", f"{results['pct_change']:.2f}%")
+                m4.metric("Result", results['result'])
+                
+                # Additional metrics
+                m5, m6, m7 = st.columns(3)
+                m5.metric("Max Price", f"{results['max_price']}")
+                m6.metric("Min Price", f"{results['min_price']}")
+                m7.metric("Duration", results['duration'])
                 
                 # Results details
                 with st.expander("Detailed Results", expanded=True):
                     st.write(f"**Signal Time:** {results['signal_time']}")
                     st.write(f"**Entry Time:** {results['entry_time']}")
                     st.write(f"**Test Period:** {results['test_period']}")
-                    st.write(f"**Duration:** {results['duration']}")
                     st.write(f"**Data Points:** {results['data_points']}")
                     
                     st.write("\n**Stop Loss:**")
@@ -310,8 +352,6 @@ def main():
                         hit = i in results['tp_hit']
                         st.write(f"TP{i+1}: {tp} - {'✅ Hit' if hit else '❌ Not Hit'} " + 
                                 (f"at {results[f'tp{i+1}_hit_time']}" if hit else ""))
-                    
-                    st.write(f"\n**Final Result:** {results['result']}")
                 
                 # Price chart
                 st.subheader("Price Movement")
@@ -319,12 +359,14 @@ def main():
                 
             except Exception as e:
                 st.error(f"Error: {str(e)}")
-                st.info("Example format: BTC/USDT Buy at 35000, SL at 34500, TP1 at 35500, Time: 2023-11-15 08:00")
+                st.info("Example formats:\n"
+                        "- Buy: BTC/USDT Buy at 35000, SL at 34500, TP1 at 35500, Time: 2023-11-15 08:00\n"
+                        "- Sell: ETH/USDT Sell at 2000, SL at 2050, TP1 at 1950, Time: 2023-12-01 12:00")
 
     with col2:
         st.subheader("Example Signals")
         st.code("""BTC/USDT Buy at 35000, SL at 34500, TP1 at 35500, Time: 2023-11-15 08:00""")
-        st.code("""ETH/BTC Sell at 0.075, Stop Loss 0.078, TP1 0.072, TP2 0.070, Time: 2023-12-01 12:00""")
+        st.code("""ETH/USDT Sell at 2000, Stop Loss 2050, TP1 1950, TP2 1900, Time: 2023-12-01 12:00""")
         st.code("""SOL/USDT Entry 120, SL 115, TP1 125, TP2 130, TP3 135, Time: 2024-01-10 16:30""")
         
         st.subheader("How To Use")
@@ -332,6 +374,7 @@ def main():
         1. Paste your trade signal in the left panel
         2. Include all required details:
            - Trading pair (e.g., BTC/USDT)
+           - Direction (buy at/sell at/entry at)
            - Entry price
            - Stop loss
            - Take profit levels
